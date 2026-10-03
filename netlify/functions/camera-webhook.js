@@ -1,7 +1,11 @@
-// Camera HikCentral ANPR - Webhook nhận biển số xe
-const { getStore } = require('@netlify/blobs');
+import { getStore } from '@netlify/blobs';
 
-exports.handler = async (event, context) => {
+const STORE_CONFIG = {
+  main: 'mining-app-main',
+  sessions: 'mining-app-sessions'
+};
+
+export default async (event, context) => {
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
@@ -20,9 +24,14 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Kiểm tra reset_lock để tránh ghi đè dữ liệu khi đang reset
-    const store = getStore('kv');
-    const resetLock = await store.get('reset_lock');
+    const store = getStore({ name: STORE_CONFIG.main, consistency: 'strong' });
+    let resetLock = null;
+    try {
+      resetLock = await store.get('reset_lock');
+    } catch (e) {
+      console.error('Error reading reset_lock:', e);
+    }
+    
     if (resetLock && parseInt(resetLock) > Date.now()) {
       return {
         statusCode: 409,
@@ -30,16 +39,15 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Lấy events hiện tại
     let events = [];
     try {
-      const eventsData = await store.get('events');
-      events = eventsData ? JSON.parse(eventsData) : [];
+      const eventsData = await store.get('events', { type: 'json' });
+      events = eventsData ? eventsData : [];
     } catch (e) {
       console.error('Error reading events:', e);
+      events = [];
     }
 
-    // Tạo event xe vào cổng từ camera
     const newEvent = {
       id: `camera_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       type: 'gate_in',
@@ -52,14 +60,22 @@ exports.handler = async (event, context) => {
 
     events.push(newEvent);
 
-    // Lưu events
-    await store.set('events', JSON.stringify(events), { atomic: true });
+    try {
+      await store.setJSON('events', events);
+      console.log(`Event saved successfully: ${newEvent.plate} (ID: ${newEvent.id})`);
+    } catch (e) {
+      console.error('Error saving events to store:', e);
+    }
 
-    // Lưu camera log
     try {
       let cameraLog = [];
-      const cameraLogData = await store.get('camera_log');
-      cameraLog = cameraLogData ? JSON.parse(cameraLogData) : [];
+      try {
+        const cameraLogData = await store.get('camera_log', { type: 'json' });
+        cameraLog = cameraLogData ? cameraLogData : [];
+      } catch (e) {
+        console.error('Error reading camera_log:', e);
+        cameraLog = [];
+      }
       
       cameraLog.push({
         timestamp: Date.now(),
@@ -68,14 +84,14 @@ exports.handler = async (event, context) => {
         imageUrl: imageUrl || null
       });
 
-      // Giữ lại 1000 bản ghi gần nhất
       if (cameraLog.length > 1000) {
         cameraLog = cameraLog.slice(-1000);
       }
 
-      await store.set('camera_log', JSON.stringify(cameraLog));
+      await store.setJSON('camera_log', cameraLog);
+      console.log(`Camera log updated: ${cameraLog.length} records`);
     } catch (logErr) {
-      console.warn('Error logging camera data:', logErr);
+      console.error('Error saving camera log:', logErr);
     }
 
     return {
